@@ -12,11 +12,9 @@ class CamManage:
         )
         self.picam2.configure(config)
         self.picam2.start()
-
         self.frame = None
         self.isRunning = False
         self.RCP = threading.Lock()
-        
         self.fps_start_time = time.time()
         self.fps_counter = 0
         self.fps_value = 0.0
