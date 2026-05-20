@@ -1,143 +1,107 @@
-import cv2 as cv,threading,time,numpy as np,serial
+import cv2 as cv
+import threading
+import time
+import numpy as np
 from picamera2 import Picamera2
 
-class Cam:
-    def __init__(s):
-        s.p=Picamera2()
-        s.p.configure(s.p.create_video_configuration(main={"size":(640,480),"format":"RGB888"}))
-        s.p.start()
-        s.f=None
-        s.l=threading.Lock()
-        s.r=0
-        s.fc=0
-        s.t=time.time()
-        s.src=np.float32([[100,180],[540,180],[620,450],[20,450]])
-        s.dst=np.float32([[0,0],[320,0],[320,240],[0,240]])
-        s.M=cv.getPerspectiveTransform(s.src,s.dst)
+class CamManage:
+    def __init__(self):
+        self.picam2 = Picamera2()
+        config = self.picam2.create_preview_configuration(
+            main={"size": (640, 480), "format": "RGB888"}
+        )
+        self.picam2.configure(config)
+        self.picam2.start()
+        self.frame = None
+        self.isRunning = False
+        self.RCP = threading.Lock()
+        self.fps_start_time = time.time()
+        self.fps_counter = 0
+        self.fps_value = 0.0
+        self.src_points = np.float32([
+            [100, 180],
+            [540, 180],
+            [620, 450],
+            [20,  450]
+        ])
+        self.dst_points = np.float32([
+            [0, 0],
+            [320, 0],     
+            [320, 240],
+            [0, 240]
+        ])
+        self.M = cv.getPerspectiveTransform(self.src_points, self.dst_points)
 
-    def start(s):
-        s.r=1
-        threading.Thread(target=s.update,daemon=True).start()
+    def start(self):
+        self.isRunning = True
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
 
-    def update(s):
-        while s.r:
-            f=cv.cvtColor(s.p.capture_array(),cv.COLOR_RGB2BGR)
-            with s.l:s.f=f
-            s.fc+=1
-            if time.time()-s.t>=1:
-                s.fps=s.fc
-                s.fc=0
-                s.t=time.time()
+    def update(self):
+        while self.isRunning:
+            array = self.picam2.capture_array()
+            frame = cv.cvtColor(array, cv.COLOR_RGB2BGR)
+            frame = cv.flip(frame, 1)
+            with self.RCP:
+                self.frame = frame
+            self.fps_counter += 1
+            if time.time() - self.fps_start_time >= 1.0:
+                self.fps_value = self.fps_counter
+                self.fps_counter = 0
+                self.fps_start_time = time.time()
 
-    def read(s):
-        with s.l:return None if s.f is None else s.f.copy()
+    def read(self):
+        with self.RCP:
+            return self.frame.copy() if self.frame is not None else None
+    def stop(self):
+        self.isRunning = False
+        if hasattr(self, 'thread'):
+            self.thread.join()
+        self.picam2.stop()
+        self.picam2.close()
 
-    def stop(s):
-        s.r=0
-        s.p.stop()
-        s.p.close()
+manager = CamManage()
+manager.start()
 
-class PID:
-    def __init__(s,kp=.9,ki=.02,kd=.5,sp=160):
-        s.kp,s.ki,s.kd,s.sp=kp,ki,kd,sp
-        s.p=0
-        s.i=0
-        s.t=time.time()
+show_birds_eye = True
+print("Line Detection + Bird's Eye View (optimized)")
+print("Press 'b' to toggle Birds Eye | 'q' or 'l' to quit")
 
-    def c(s,v):
-        e=s.sp-v
-        n=time.time()
-        d=n-s.t
-        if d>0:
-            s.i+=e*d
-            der=(e-s.p)/d
-        else:der=0
-        o=s.kp*e+s.ki*s.i+s.kd*der
-        s.p=e
-        s.t=n
-        return o
+while True:
+    frame = manager.read()
+    if frame is None:
+        continue
+      
+    birds_eye = cv.warpPerspective(frame, manager.M, (320, 240))
+    gray = cv.cvtColor(birds_eye, cv.COLOR_BGR2GRAY)
+    _, binary = cv.threshold(gray, 100, 255, cv.THRESH_BINARY_INV)
+    binary = cv.dilate(binary, None, iterations=2)
+    contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    line_center_x = 160   
+    error = 0
+    
+    if contours:
+        largest = max(contours, key=cv.contourArea)
+        if cv.contourArea(largest) > 300:
+            x, y, w, h = cv.boundingRect(largest)
+            line_center_x = x + w // 2
+            cv.rectangle(birds_eye, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv.circle(birds_eye, (line_center_x, y + h//2), 8, (0, 255, 0), -1)
 
-try:
-    ser=serial.Serial('/dev/ttyACM0',115200,timeout=0,write_timeout=0)
-    time.sleep(2)
-    print("Arduino Connected")
-except:
-    ser=None
-    print("No Arduino")
+    error = line_center_x - 160
+    cv.putText(frame, f"Error: {error}", (10, 40), cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+    cv.putText(frame, f"FPS: {manager.fps_value:.1f}", (10, 80), cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    pts = manager.src_points.astype(np.int32)
+    cv.polylines(frame, [pts.reshape((-1,1,2))], True, (255, 0, 0), 3)
+    cv.imshow('Raw + Trapezoid', frame)
+    if show_birds_eye:
+        cv.imshow('Birds Eye View', birds_eye)
+        cv.imshow('Binary', binary)
+    key = cv.waitKey(1) & 0xFF
+    if key == ord('q') or key == ord('l'):
+        break
+    elif key == ord('b'):
+        show_birds_eye = not show_birds_eye
 
-cam=Cam()
-cam.start()
-
-pid=PID()
-
-base=40
-maxs=35
-lasts=time.time()
-
-while 1:
-    f=cam.read()
-    if f is None:continue
-    b=cv.warpPerspective(f,cam.M,(320,240))
-    g=cv.cvtColor(b,cv.COLOR_BGR2GRAY)
-    _,bin=cv.threshold(g,120,255,cv.THRESH_BINARY)
-    bin=cv.dilate(bin,None,iterations=1)
-    roi=bin[120:240,:]
-    c,_=cv.findContours(roi,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)
-    cen=[]
-
-    if c:
-        c=sorted(c,key=cv.contourArea,reverse=1)[:2]
-        for x in c:
-            if cv.contourArea(x)<300:continue
-            xx,y,w,h=cv.boundingRect(x)
-            y+=120
-            cx=xx+w//2
-            cen.append(cx)
-            cv.rectangle(b,(xx,y),(xx+w,y+h),(0,255,0),2)
-            cv.circle(b,(cx,y+h//2),5,(0,255,0),-1)
-
-    if len(cen)==2:
-        mid=(cen[0]+cen[1])//2
-        out=pid.c(mid)
-        cv.line(b,(mid,0),(mid,240),(255,0,255),2)
-
-    elif len(cen)==1:
-        mid=cen[0]
-        out=pid.c(mid)
-
-    else:
-        mid=160
-        out=pid.c(160)
-
-    s=max(min(out,maxs),-maxs)
-    l=base-s
-    r=base+s
-
-    if abs(s)<8:
-        l+=8
-        r+=8
-
-    l=max(min(int(l),100),0)
-    r=max(min(int(r),100),0)
-
-    if ser and time.time()-lasts>.03:
-        ser.write(f"L:{l} R:{r}\n".encode())
-        lasts=time.time()
-
-    cv.putText(f,f"L:{l} R:{r}",(10,40),0,.8,(0,255,0),2)
-    cv.putText(f,f"FPS:{cam.fps}",(10,80),0,.8,(0,255,255),2)
-    p=cam.src.astype(np.int32)
-    cv.polylines(f,[p.reshape((-1,1,2))],1,(255,0,0),2)
-    cv.imshow("Raw",f)
-    cv.imshow("Birds",b)
-    cv.imshow("Binary",bin)
-
-    if cv.waitKey(1)&0xFF==ord('q'):break
-
-cam.stop()
-
-if ser:
-    ser.write(b"L:0 R:0\n")
-    ser.close()
-
+manager.stop()
 cv.destroyAllWindows()
