@@ -81,6 +81,7 @@ while 1:
     g=cv.cvtColor(b,cv.COLOR_BGR2GRAY)
     _,bin=cv.threshold(g,120,255,cv.THRESH_BINARY)
     bin=cv.dilate(bin,None,iterations=1)
+    
     roi=bin[120:240,:]
     c,_=cv.findContours(roi,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)
     cen=[]
